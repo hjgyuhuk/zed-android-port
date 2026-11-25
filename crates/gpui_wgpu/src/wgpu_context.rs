@@ -17,6 +17,7 @@ pub struct WgpuContext {
     pub queue: Arc<wgpu::Queue>,
     backend: WgpuBackend,
     dual_source_blending: bool,
+    uses_texture_instance_data: bool,
     color_texture_format: wgpu::TextureFormat,
     errors: Arc<DeviceErrorState>,
 }
@@ -309,6 +310,7 @@ impl WgpuContext {
             adapter.get_info().backend
         );
         let backend = WgpuBackend::Native(adapter.get_info().backend);
+        let uses_texture_instance_data = Self::needs_texture_instance_data(&adapter);
 
         Self {
             instance,
@@ -317,6 +319,7 @@ impl WgpuContext {
             queue: Arc::new(queue),
             backend,
             dual_source_blending,
+            uses_texture_instance_data,
             color_texture_format,
             errors,
         }
@@ -409,6 +412,7 @@ impl WgpuContext {
             device.limits(),
         );
 
+        let uses_texture_instance_data = Self::needs_texture_instance_data(&adapter);
         let context = Self {
             instance,
             adapter,
@@ -416,6 +420,7 @@ impl WgpuContext {
             queue: Arc::new(queue),
             backend,
             dual_source_blending,
+            uses_texture_instance_data,
             color_texture_format,
             errors,
         };
@@ -440,8 +445,7 @@ impl WgpuContext {
         }
 
         let color_atlas_texture_format = Self::select_color_texture_format(adapter)?;
-        #[cfg(target_family = "wasm")]
-        let required_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+        let required_limits = if Self::needs_texture_instance_data(adapter) {
             wgpu::Limits::downlevel_webgl2_defaults()
                 .using_resolution(adapter.limits())
                 .using_alignment(adapter.limits())
@@ -450,10 +454,6 @@ impl WgpuContext {
                 .using_resolution(adapter.limits())
                 .using_alignment(adapter.limits())
         };
-        #[cfg(not(target_family = "wasm"))]
-        let required_limits = wgpu::Limits::downlevel_defaults()
-            .using_resolution(adapter.limits())
-            .using_alignment(adapter.limits());
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -476,10 +476,36 @@ impl WgpuContext {
         ))
     }
 
+    /// Whether instance data must travel through a texture instead of a storage
+    /// buffer. WebGL2 has no storage buffers at all, and OpenGL ES 3.0 has none
+    /// either; even on ES 3.1+ many mobile drivers expose zero vertex-stage
+    /// storage blocks, so the adapter's actual limits decide.
+    fn needs_texture_instance_data(adapter: &wgpu::Adapter) -> bool {
+        if adapter.get_info().backend != wgpu::Backend::Gl {
+            return false;
+        }
+        if cfg!(target_family = "wasm") {
+            return true;
+        }
+        let limits = adapter.limits();
+        let downlevel = adapter.get_downlevel_capabilities();
+        limits.max_storage_buffers_per_shader_stage == 0
+            || !downlevel
+                .flags
+                .contains(wgpu::DownlevelFlags::VERTEX_STORAGE)
+    }
+
     #[cfg(not(target_family = "wasm"))]
     pub fn instance(display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>) -> wgpu::Instance {
+        // Android forces OpenGL ES: the EGL backend is the port's default, and
+        // enabling Vulkan here would let sort_adapters prefer it again.
+        #[cfg(target_os = "android")]
+        let backends = wgpu::Backends::GL;
+        #[cfg(not(target_os = "android"))]
+        let backends = wgpu::Backends::VULKAN | wgpu::Backends::GL;
+
         wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            backends,
             flags: wgpu::InstanceFlags::default(),
             backend_options: wgpu::BackendOptions::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
@@ -688,7 +714,8 @@ impl WgpuContext {
         let required_usages = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
         let bgra_features = adapter.get_texture_format_features(wgpu::TextureFormat::Bgra8Unorm);
         let rgba_features = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8Unorm);
-        #[cfg(target_family = "wasm")]
+        // Some GL drivers (notably mobile GLES) have shaky GL_BGRA_EXT support;
+        // prefer RGBA there and swizzle on upload instead.
         if adapter.get_info().backend == wgpu::Backend::Gl
             && rgba_features.allowed_usages.contains(required_usages)
         {
@@ -727,7 +754,7 @@ impl WgpuContext {
     }
 
     pub fn uses_webgl_instance_data(&self) -> bool {
-        matches!(self.backend, WgpuBackend::Gl) && cfg!(target_family = "wasm")
+        self.uses_texture_instance_data
     }
 
     pub fn supports_dual_source_blending(&self) -> bool {

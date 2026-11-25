@@ -2183,8 +2183,19 @@ impl WgpuRenderer {
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface_config.alpha_mode = alpha_mode;
-        if let Some(mode) = config.preferred_present_mode {
-            self.surface_config.present_mode = mode;
+        // The new surface may not support the present mode the old one did
+        // (e.g. Mailbox on an EGL surface), so re-filter against its capabilities
+        // instead of overwriting blindly.
+        if let Some(context) = self.context.as_ref().and_then(|cell| cell.borrow().clone()) {
+            let caps = surface.get_capabilities(&context.adapter);
+            let preferred = config
+                .preferred_present_mode
+                .unwrap_or(self.surface_config.present_mode);
+            self.surface_config.present_mode = if caps.present_modes.contains(&preferred) {
+                preferred
+            } else {
+                wgpu::PresentMode::Fifo
+            };
         }
 
         let mut core = match std::mem::replace(&mut self.state, RendererState::Released) {
@@ -2805,6 +2816,47 @@ mod tests {
     fn webgl_shader_is_valid_wgsl_without_storage_buffers() {
         assert!(!WEBGL_SHADERS.contains("var<storage"));
         validate_wgsl(WEBGL_SHADERS, naga::valid::Capabilities::empty());
+    }
+
+    #[test]
+    fn webgl_shaders_translate_to_glsl_es_300() {
+        let module = naga::front::wgsl::parse_str(WEBGL_SHADERS).expect("shader should parse");
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("shader should validate");
+        for entry_point in &module.entry_points {
+            let options = naga::back::glsl::Options {
+                version: naga::back::glsl::Version::Embedded {
+                    version: 300,
+                    is_webgl: false,
+                },
+                ..Default::default()
+            };
+            let pipeline_options = naga::back::glsl::PipelineOptions {
+                shader_stage: entry_point.stage,
+                entry_point: entry_point.name.clone(),
+                multiview: None,
+            };
+            let mut output = String::new();
+            let mut writer = naga::back::glsl::Writer::new(
+                &mut output,
+                &module,
+                &info,
+                &options,
+                &pipeline_options,
+                naga::proc::BoundsCheckPolicies::default(),
+            )
+            .unwrap_or_else(|error| panic!("GLSL writer for {} failed: {error}", entry_point.name));
+            writer.write().unwrap_or_else(|error| {
+                panic!(
+                    "GLSL ES 300 translation of {} failed: {error}",
+                    entry_point.name
+                )
+            });
+        }
     }
 
     #[test]

@@ -89,9 +89,9 @@ pub(crate) struct AndroidWindowState {
     pub(crate) gpu_context: GpuContext,
     /// Holds an `ANativeWindow_acquire` refcount on the underlying native
     /// window so the pointer stored in `raw_window` stays valid for the
-    /// lifetime of any Vulkan `VkSurfaceKHR` referencing it. Dropped (and
-    /// thus refcount-decremented) on `detach_surface` and replaced when
-    /// `attach_surface` runs with a fresh window.
+    /// lifetime of any GPU surface (`VkSurfaceKHR` or `EGLSurface`) referencing
+    /// it. Dropped (and thus refcount-decremented) on `detach_surface` and
+    /// replaced when `attach_surface` runs with a fresh window.
     pub(crate) native_window: Option<NativeWindow>,
     /// The next paint must redraw everything, because of something gpui's
     /// invalidator doesn't know about: a fresh swapchain, a cleared atlas, state
@@ -255,7 +255,7 @@ impl AndroidWindowStatePtr {
                 DevicePixels(width.max(1) as i32),
                 DevicePixels(height.max(1) as i32),
             ),
-            // Android's Vulkan surfaces only offer the inherit alpha mode, and
+            // Android's GPU surfaces only offer the inherit alpha mode, and
             // the SurfaceViews' opaque pixel formats decide the compositing.
             transparent: true,
             // Mailbox lets the swap chain discard a stale frame at present
@@ -294,6 +294,14 @@ impl AndroidWindowStatePtr {
             log::info!("AndroidWindow::attach_surface: replaced surface ({width}x{height})");
         } else {
             let renderer = WgpuRenderer::new(gpu_context, &raw_window, config, None)?;
+            if let Some(specs) = renderer.gpu_specs() {
+                log::info!(
+                    "AndroidWindow::attach_surface: GPU {} (driver: {}, {})",
+                    specs.device_name,
+                    specs.driver_name,
+                    specs.driver_info,
+                );
+            }
             state.renderer = Some(renderer);
             log::info!("AndroidWindow::attach_surface: created renderer ({width}x{height})");
         }
@@ -309,7 +317,7 @@ impl AndroidWindowStatePtr {
         }
 
         // Replace the previous wrapper (if any). The drop releases the prior
-        // ANativeWindow refcount; Vulkan's VkSurfaceKHR holds its own ref.
+        // ANativeWindow refcount; the wgpu surface holds its own ref.
         state.native_window = Some(native_window);
         state.visibility = WindowVisibility::Visible;
 
@@ -359,7 +367,7 @@ impl AndroidWindowStatePtr {
         // therefore the atlas) leaves those ids dangling, and the next
         // paint indexes into an empty `WgpuAtlasStorage`, panicking at
         // `wgpu_atlas.rs:79`. `unconfigure_surface` clears the swapchain
-        // but keeps the VkSurfaceKHR + atlas + pipelines.
+        // but keeps the device + atlas + pipelines.
         let mut state = self.state.borrow_mut();
         if let Some(renderer) = state.renderer.as_mut() {
             renderer.unconfigure_surface();
