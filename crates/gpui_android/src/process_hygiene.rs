@@ -10,10 +10,8 @@
 //! every missing standard fd keeps fd numbers 0 to 2 out of circulation.
 //!
 //! The same process starts in the host's `/`, and a child spawned without
-//! an explicit directory inherits it. Inside the rootfs engine that
-//! directory has no guest spelling (`getcwd` reports it unreachable), so
-//! node died in `uv_cwd` before npm could run `npm info`. The files dir is
-//! the one directory with the same path on both sides.
+//! an explicit directory inherits it. The files dir is a directory the
+//! app owns and every child can reach, so the process moves there at boot.
 
 use std::ffi::CString;
 use std::path::Path;

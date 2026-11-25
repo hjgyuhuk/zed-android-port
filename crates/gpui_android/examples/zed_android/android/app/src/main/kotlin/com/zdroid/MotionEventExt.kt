@@ -3,6 +3,9 @@ package com.zdroid
 import android.app.Activity
 import android.view.InputDevice
 import android.view.MotionEvent
+import android.view.SurfaceView
+import android.view.ViewGroup
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -49,12 +52,31 @@ internal fun MotionEvent.forwardTo(windowId: Long) {
 }
 
 /// Draws behind the system bars and the cutout, so gpui's surface gets the
-/// whole window, and hides the bars until a swipe brings them back, as an editor
-/// on a desktop does.
+/// whole window, and keeps the bars visible: the surface is margined inside
+/// them ([insetBySafeArea]), so the editor never draws under them.
 internal fun Activity.enterEdgeToEdge() {
     WindowCompat.setDecorFitsSystemWindows(window, false)
-    WindowInsetsControllerCompat(window, window.decorView).apply {
-        hide(WindowInsetsCompat.Type.systemBars())
-        systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    WindowInsetsControllerCompat(window, window.decorView)
+        .show(WindowInsetsCompat.Type.systemBars())
+}
+
+/// Margins the surface inside the system bars and the cutout, making gpui's
+/// window the safe area. The margins use insets ignoring visibility so they
+/// hold still while the keyboard covers the navigation bar; the part of the
+/// keyboard above the surface's bottom edge is what Rust's layout avoids.
+internal fun SurfaceView.insetBySafeArea() {
+    ViewCompat.setOnApplyWindowInsetsListener(this) { view, insets ->
+        val safe = insets.getInsetsIgnoringVisibility(
+            WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+        )
+        val params = view.layoutParams as? ViewGroup.MarginLayoutParams
+        if (params != null &&
+            (params.leftMargin != safe.left || params.topMargin != safe.top ||
+                params.rightMargin != safe.right || params.bottomMargin != safe.bottom)
+        ) {
+            params.setMargins(safe.left, safe.top, safe.right, safe.bottom)
+            view.layoutParams = params
+        }
+        insets
     }
 }

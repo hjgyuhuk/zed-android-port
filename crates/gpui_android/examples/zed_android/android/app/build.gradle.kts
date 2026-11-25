@@ -1,5 +1,3 @@
-import java.net.URL
-import java.security.MessageDigest
 import java.util.Properties
 
 plugins {
@@ -20,99 +18,17 @@ val signingProps = Properties().apply {
 }
 val hasReleaseSigning = signingPropsFile.exists()
 
-// Ubuntu base image bundling.
-//
-// The rootfs the engine runs is extracted on first launch from an APK
-// asset, so the app is complete without a network. `fetchRootfsImage`
-// downloads the tarball named in crates/zdroid_runtime/rootfs-image.properties
-// into build/rootfs/ and verifies its SHA-256 (the Rust side compiles the
-// same file in and writes name and digest to the rootfs sentinel);
-// `stageRootfsAsset` copies it to assets/rootfs/image.tgz, which is
-// gitignored. The asset is stored uncompressed in the APK (`noCompress
-// tgz` below): it is gzip already, and AAssetManager serves a stored
-// asset by mmap.
 val workspaceRoot = file("../../../../../..").canonicalFile
-val rootfsImageProps = Properties().apply {
-    file("${workspaceRoot}/crates/zdroid_runtime/rootfs-image.properties").inputStream().use { load(it) }
-}
-val rootfsImageName: String = rootfsImageProps.getProperty("name")
-val rootfsImageUrl: String = rootfsImageProps.getProperty("url")
-val rootfsImageSha256: String = rootfsImageProps.getProperty("sha256").lowercase()
-val rootfsImageDownload = file("build/rootfs/${rootfsImageName}")
-// Staged under a fixed name without a `.gz` suffix: aapt gunzips `.gz`
-// assets at packaging time and drops the suffix, which would turn the
-// 33 MB image into a 120 MB tar.
-val rootfsImageAsset = file("src/main/assets/rootfs/image.tgz")
-
-fun sha256Of(file: File): String {
-    val digest = MessageDigest.getInstance("SHA-256")
-    file.inputStream().use { input ->
-        val buffer = ByteArray(1 shl 16)
-        while (true) {
-            val count = input.read(buffer)
-            if (count < 0) break
-            digest.update(buffer, 0, count)
-        }
-    }
-    return digest.digest().joinToString("") { "%02x".format(it) }
-}
-
-tasks.register("fetchRootfsImage") {
-    description = "Download the Ubuntu base image named in rootfs-image.properties and verify its SHA-256."
-    group = "build setup"
-
-    inputs.property("sha256", rootfsImageSha256)
-    inputs.property("url", rootfsImageUrl)
-    outputs.file(rootfsImageDownload)
-    doLast {
-        if (rootfsImageDownload.isFile && sha256Of(rootfsImageDownload) == rootfsImageSha256) {
-            return@doLast
-        }
-        rootfsImageDownload.parentFile.mkdirs()
-        val partial = File(rootfsImageDownload.path + ".part")
-        logger.lifecycle("fetchRootfsImage: downloading $rootfsImageUrl")
-        URL(rootfsImageUrl).openStream().use { input ->
-            partial.outputStream().use { output -> input.copyTo(output) }
-        }
-        val actual = sha256Of(partial)
-        if (actual != rootfsImageSha256) {
-            partial.delete()
-            throw GradleException(
-                "fetchRootfsImage: SHA-256 mismatch for $rootfsImageName: expected $rootfsImageSha256, got $actual"
-            )
-        }
-        if (!partial.renameTo(rootfsImageDownload)) {
-            throw GradleException("fetchRootfsImage: cannot move ${partial.path} into place")
-        }
-    }
-}
-
-tasks.register<Copy>("stageRootfsAsset") {
-    description = "Copy the verified Ubuntu base image into assets/rootfs/ for APK packaging."
-    group = "build setup"
-
-    dependsOn("fetchRootfsImage")
-    from(rootfsImageDownload)
-    into(rootfsImageAsset.parentFile)
-    rename { rootfsImageAsset.name }
-    inputs.file(rootfsImageDownload)
-    outputs.file(rootfsImageAsset)
-}
-
-tasks.matching { it.name == "preBuild" }.configureEach {
-    dependsOn("stageRootfsAsset")
-}
 
 // zed-askpass-helper bundling.
 //
-// `zed-askpass-helper` is the SSH_ASKPASS relay binary that ssh
-// (running in the Ubuntu runtime) exec's to prompt the user for a
-// password via Zed's in-process modal. It also stands in for
-// `zed --printenv` in Zed's login shell capture. The helper MUST be
-// statically linked: the engine loader maps programs into the rootfs,
-// where bionic's dynamic linker (`/system/bin/linker64`) doesn't exist,
-// so a dynamically-linked build fails exec with the shell's misleading
-// "not found".
+// `zed-askpass-helper` is the SSH_ASKPASS relay binary that the system's
+// ssh exec's to prompt the user for a password via Zed's in-process
+// modal. It also stands in for `zed --printenv` in Zed's shell capture.
+// It ships as `libaskpass.so` in jniLibs so the installer extracts it to
+// ApplicationInfo.nativeLibraryDir, the one app-owned location an
+// untrusted app may exec from at any targetSdk (W^X forbids exec'ing
+// anything from the app's writable dirs).
 //
 // The helper crate at `examples/zed_android/askpass-helper/` is its
 // own workspace and ships a `.cargo/config.toml` setting
@@ -120,13 +36,13 @@ tasks.matching { it.name == "preBuild" }.configureEach {
 // `cargo ndk` with `workingDir` set to that crate's directory, gradle
 // guarantees the static-link config is in scope for every APK build
 // — no chance of a contributor accidentally shipping a dynamic
-// binary by building from the wrong cwd or hand-editing the asset.
+// binary by building from the wrong cwd or hand-editing the artifact.
 val askpassHelperDir = file("${workspaceRoot}/crates/gpui_android/examples/zed_android/askpass-helper")
 val askpassHelperBin = file("${askpassHelperDir}/target/aarch64-linux-android/release/zed-askpass-helper")
-val askpassHelperAsset = file("src/main/assets/zed-askpass-helper")
+val askpassHelperJniLib = file("src/main/jniLibs/arm64-v8a/libaskpass.so")
 
 tasks.register<Exec>("buildAskpassHelper") {
-    description = "Build zed-askpass-helper (static aarch64) via cargo-ndk and stage into assets/."
+    description = "Build zed-askpass-helper (static aarch64) via cargo-ndk."
     group = "build setup"
 
     workingDir(askpassHelperDir)
@@ -147,106 +63,31 @@ tasks.register<Exec>("buildAskpassHelper") {
     providers.environmentVariable("ANDROID_NDK_HOME").orNull?.let { ndk ->
         environment("ANDROID_NDK_HOME", ndk)
     }
+    // Cargo lets an environment RUSTFLAGS replace the target rustflags in
+    // the crate's .cargo/config.toml, which for the helper means losing the
+    // static link. The helper's own config governs whatever the environment
+    // holds (a device-specific build may export RUSTFLAGS for the app).
+    environment.remove("RUSTFLAGS")
+    environment.remove("CARGO_ENCODED_RUSTFLAGS")
 
     outputs.upToDateWhen { false }
     outputs.file(askpassHelperBin)
 }
 
-tasks.register<Copy>("stageAskpassHelperAsset") {
-    description = "Copy the freshly-built zed-askpass-helper into assets/ for APK packaging."
+tasks.register<Copy>("stageAskpassHelperJniLib") {
+    description = "Copy the freshly-built zed-askpass-helper into jniLibs as libaskpass.so."
     group = "build setup"
 
     dependsOn("buildAskpassHelper")
     from(askpassHelperBin)
-    into(askpassHelperAsset.parentFile)
-    rename { askpassHelperAsset.name }
+    into(askpassHelperJniLib.parentFile)
+    rename { askpassHelperJniLib.name }
     inputs.file(askpassHelperBin)
-    outputs.file(askpassHelperAsset)
+    outputs.file(askpassHelperJniLib)
 }
 
 tasks.matching { it.name == "preBuild" }.configureEach {
-    dependsOn("stageAskpassHelperAsset")
-}
-
-// Rootfs engine loader.
-//
-// `libzdload.so` is a static, libc-free aarch64 executable (crates/
-// zd_loader, its own workspace) that the kernel execs for every guest
-// process. It is packaged as a native library so the installer extracts
-// it to ApplicationInfo.nativeLibraryDir, the one app-owned location an
-// untrusted app may exec from at any targetSdk. `verifyZdLoader` fails
-// the build if a flag change produces a PIE, a dynamic interpreter, or a
-// different image base, because the engine's seccomp filter only allows
-// syscalls from the fixed window the loader is linked into.
-val zdLoaderDir = file("${workspaceRoot}/crates/zd_loader")
-val zdLoaderBin = file("${zdLoaderDir}/target/aarch64-linux-android/release/zd_loader")
-val zdLoaderJniLib = file("src/main/jniLibs/arm64-v8a/libzdload.so")
-val ndkHomeForVerify = providers.environmentVariable("ANDROID_NDK_HOME")
-
-tasks.register<Exec>("buildZdLoader") {
-    description = "Build the static rootfs-engine loader via cargo-ndk."
-    group = "build setup"
-
-    workingDir(zdLoaderDir)
-    commandLine(
-        "cargo",
-        "ndk",
-        "-t",
-        "arm64-v8a",
-        "-P",
-        "31",
-        "build",
-        "--release",
-        "--locked",
-        "--target-dir",
-        file("${zdLoaderDir}/target").absolutePath,
-    )
-
-    providers.environmentVariable("ANDROID_NDK_HOME").orNull?.let { ndk ->
-        environment("ANDROID_NDK_HOME", ndk)
-    }
-    // Cargo lets an environment RUSTFLAGS replace the target rustflags in a
-    // crate's .cargo/config.toml, which for the loader means losing the
-    // static, fixed-base, no-crt link: crt1.o then defines a second `_start`
-    // and lld fails with a duplicate symbol. So the loader's own config governs
-    // whatever the environment holds.
-    environment.remove("RUSTFLAGS")
-    environment.remove("CARGO_ENCODED_RUSTFLAGS")
-
-    // Cargo tracks transitive sources, lockfiles and build flags; a Gradle
-    // source-only check can reuse a loader from a different dependency graph.
-    outputs.upToDateWhen { false }
-    outputs.file(zdLoaderBin)
-}
-
-tasks.register<Exec>("verifyZdLoader") {
-    description = "Check the loader ELF is static, non-PIE, 16 KiB aligned and linked at the engine's fixed base."
-    group = "verification"
-
-    dependsOn("buildZdLoader")
-    doFirst {
-        if (!ndkHomeForVerify.isPresent) {
-            throw GradleException("verifyZdLoader needs ANDROID_NDK_HOME (the same NDK as the lib build)")
-        }
-    }
-    commandLine("sh", "${zdLoaderDir}/verify.sh", ndkHomeForVerify.getOrElse(""), zdLoaderBin.path)
-    inputs.file(zdLoaderBin)
-}
-
-tasks.register<Copy>("stageZdLoaderJniLib") {
-    description = "Copy the verified loader into jniLibs as libzdload.so."
-    group = "build setup"
-
-    dependsOn("verifyZdLoader")
-    from(zdLoaderBin)
-    into(zdLoaderJniLib.parentFile)
-    rename { zdLoaderJniLib.name }
-    inputs.file(zdLoaderBin)
-    outputs.file(zdLoaderJniLib)
-}
-
-tasks.matching { it.name == "preBuild" }.configureEach {
-    dependsOn("stageZdLoaderJniLib")
+    dependsOn("stageAskpassHelperJniLib")
 }
 
 android {
@@ -261,17 +102,15 @@ android {
         // Android 12. Raised from 26 for 0.8.5's Armv9 build and kept when
         // 0.15.0 went back to Armv8.2 cores (.cargo/config.toml), since
         // nothing since has been checked below it. Keep in sync with `-P`
-        // in the two tasks above.
+        // in the task above.
         minSdk = 31
-        // targetSdk 35. The old pin at 28 kept the app in a SELinux domain
-        // that may exec app-private files; the rootfs engine made that
-        // moot (the kernel only execs the loader in the native library
-        // dir, and the Ubuntu binaries are mapped, not exec'd). What the
-        // level buys: no "built for an older version" install warning, a
-        // real notification permission prompt (33+), and the foreground
-        // service type declared here is enforced (34+). What it costs:
-        // raw /sdcard paths need All files access (MANAGE_EXTERNAL_STORAGE);
-        // see AndroidManifest.xml.
+        // targetSdk 35. What the level buys: no "built for an older
+        // version" install warning, a real notification permission prompt
+        // (33+), and the foreground service type declared here is enforced
+        // (34+). What it costs: raw /sdcard paths need All files access
+        // (MANAGE_EXTERNAL_STORAGE); see AndroidManifest.xml. Exec'ing
+        // app-owned files is only allowed from the native library dir,
+        // which is where the askpass helper ships.
         targetSdk = 35
         versionCode = 22
         versionName = "0.4.4"
@@ -286,23 +125,17 @@ android {
         }
     }
 
-    // The loader must exist as a real file on disk: the kernel execs it
-    // by path from ApplicationInfo.nativeLibraryDir. AGP 8 keeps native
-    // libs uncompressed inside the APK by default (extractNativeLibs =
-    // false), so opt back into extraction; this DSL is what writes the
+    // The askpass helper must exist as a real file on disk: the kernel
+    // execs it by path from ApplicationInfo.nativeLibraryDir. AGP 8 keeps
+    // native libs uncompressed inside the APK by default (extractNativeLibs
+    // = false), so opt back into extraction; this DSL is what writes the
     // manifest attribute. keepDebugSymbols keeps the strip task off the
-    // hand-linked static ELF.
+    // statically linked helper ELF.
     packaging {
         jniLibs {
             useLegacyPackaging = true
-            keepDebugSymbols += "**/libzdload.so"
+            keepDebugSymbols += "**/libaskpass.so"
         }
-    }
-
-    // The bundled rootfs image is gzip already; storing it lets the
-    // installer stream it straight out of the APK.
-    androidResources {
-        noCompress += listOf("tgz")
     }
 
     compileOptions {

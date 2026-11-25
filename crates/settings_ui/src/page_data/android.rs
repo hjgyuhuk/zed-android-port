@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use gpui::{App, PromptLevel, Window};
+use gpui::App;
 
 use crate::{ActionLink, SettingField, SettingItem, SettingsPage, SettingsPageItem, USER};
 
@@ -18,95 +18,10 @@ fn dispatch_app_action(name: &'static str, cx: &mut App) {
     });
 }
 
-/// Closes Settings once a runtime job starts, as Zed's Open Keymap link
-/// does: the job's progress shows in the workspace's window, which the
-/// Settings window covers, and on Android activating the workspace's window
-/// doesn't bring it forward.
-fn close_for_runtime_job(window: &mut Window) {
-    window.remove_window();
-}
-
 pub(super) fn android_page() -> SettingsPage {
-    let runtime = zdroid_runtime::Runtime::new(&zdroid_runtime::data_path());
-    let installed = runtime.installed_image();
-    let runtime_installed = installed.is_some();
-    let runtime_description = match &installed {
-        Some(image) => format!(
-            "Installed from {}. Resetting extracts the bundled image again and removes what \
-             you installed with apt; your home folder, projects and settings stay.",
-            image.name
-        ),
-        None => "The runtime is not installed, so the terminal and language servers cannot \
-                 start. Extract the bundled Ubuntu image."
-            .to_string(),
-    };
     SettingsPage {
         title: "Android",
         items: Box::new([
-            SettingsPageItem::SectionHeader("Runtime"),
-            SettingsPageItem::ActionLink(ActionLink {
-                title: if installed.is_some() {
-                    "Reset Runtime"
-                } else {
-                    "Install Runtime"
-                }
-                .into(),
-                description: Some(runtime_description.into()),
-                button_text: if installed.is_some() {
-                    "Reset"
-                } else {
-                    "Install"
-                }
-                .into(),
-                on_click: Arc::new(move |_settings_window, window, cx| {
-                    if !runtime_installed {
-                        dispatch_app_action("zdroid_runtime::ResetRuntime", cx);
-                        close_for_runtime_job(window);
-                        return;
-                    }
-                    // Asked in the window the button is in: the workspace's
-                    // window, where the action would ask, can sit behind it.
-                    // Settings closes only once the reset is confirmed, so
-                    // Cancel leaves the page as it was.
-                    let answer = window.prompt(
-                        PromptLevel::Warning,
-                        zdroid_runtime::RESET_PROMPT_TITLE,
-                        Some(zdroid_runtime::RESET_PROMPT_DETAIL),
-                        &zdroid_runtime::RESET_PROMPT_BUTTONS,
-                        cx,
-                    );
-                    window
-                        .spawn(cx, async move |cx| {
-                            if answer.await == Ok(zdroid_runtime::RESET_PROMPT_CONFIRM) {
-                                cx.update(|window, cx| {
-                                    dispatch_app_action(
-                                        "zdroid_runtime::ResetRuntimeConfirmed",
-                                        cx,
-                                    );
-                                    close_for_runtime_job(window);
-                                })
-                                .ok();
-                            }
-                        })
-                        .detach();
-                }),
-                files: USER,
-            }),
-            SettingsPageItem::ActionLink(ActionLink {
-                title: "Install Essentials".into(),
-                description: Some(
-                    "Install git, the SSH client, the CA certificates and time zone data with \
-                     apt, which the base image lacks. This runs on first launch and after a \
-                     reset; use it if that failed without a network."
-                        .into(),
-                ),
-                button_text: "Install".into(),
-                on_click: Arc::new(|_settings_window, window, cx| {
-                    dispatch_app_action("zdroid_runtime::InstallEssentials", cx);
-                    close_for_runtime_job(window);
-                }),
-                files: USER,
-            }),
             SettingsPageItem::SectionHeader("Storage and Background"),
             SettingsPageItem::ActionLink(ActionLink {
                 title: "Allow Access to /sdcard".into(),

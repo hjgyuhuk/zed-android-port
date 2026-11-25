@@ -12,9 +12,7 @@ workspace = true
 [lib]
 path = "src/zdroid_hooks.rs"
 
-# `util` and `gpui_util` depend on this crate, so it can't depend on them.
-# `zd_engine_core` has no dependencies.
+# `util` and `project` depend on this crate, so it can't depend on them.
 [dependencies]
 futures.workspace = true
 log.workspace = true
-zd_engine_core.workspace = true

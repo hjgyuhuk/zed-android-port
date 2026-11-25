@@ -283,26 +283,17 @@ impl AndroidCommon {
         // Latin / extended Latin.
         let cosmic = gpui_wgpu::CosmicTextSystem::new_without_system_fonts("Lilex");
         cosmic.load_fonts_dir("/system/fonts");
-        // The folders fontconfig reads on desktop Linux, where desktop Zed
-        // finds the user's fonts: the home folder's, and the runtime's for
-        // fonts installed with apt. The terminal is drawn here, so a font
-        // installed in the runtime only reaches it this way.
-        let runtime = zdroid_runtime::Runtime::new(&zdroid_runtime::data_path());
-        let rootfs = runtime.rootfs_dir();
+        // The home folder's fonts, as fontconfig reads them on desktop
+        // Linux. The terminal is drawn here, so a font the user drops
+        // into ~/.local/share/fonts reaches it this way.
         let started = std::time::Instant::now();
-        for dir in [
-            runtime.guest_home().join(".local/share/fonts"),
-            rootfs.join("usr/share/fonts"),
-            rootfs.join("usr/local/share/fonts"),
-        ] {
-            if dir.is_dir() {
-                cosmic.load_fonts_dir(&dir);
+        if let Some(home) = std::env::var_os("HOME") {
+            let fonts_dir = std::path::PathBuf::from(home).join(".local/share/fonts");
+            if fonts_dir.is_dir() {
+                cosmic.load_fonts_dir(&fonts_dir);
             }
         }
-        log::info!(
-            "fonts: loaded the home folder's and the runtime's fonts in {:?}",
-            started.elapsed()
-        );
+        log::info!("fonts: loaded the home folder's fonts in {:?}", started.elapsed());
         let text_system: Arc<dyn PlatformTextSystem> = Arc::new(cosmic);
 
         Self {

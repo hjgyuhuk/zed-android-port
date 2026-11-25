@@ -15,8 +15,5 @@ anyhow.workspace = true
 [target.'cfg(target_os = "windows")'.dependencies]
 which.workspace = true
 
-[target.'cfg(target_os = "android")'.dependencies]
-zdroid_hooks.workspace = true
-
 [lints]
 workspace = true

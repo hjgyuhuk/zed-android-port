@@ -21,7 +21,6 @@ pub mod pointer_authentication;
 mod power_mode;
 pub mod process_hygiene;
 pub mod project_import;
-pub mod runtime_links;
 pub mod runtime_service;
 pub mod selinux_canary;
 pub mod storage;

@@ -308,6 +308,7 @@ struct MasterProcess {
 impl MasterProcess {
     pub fn new(
         askpass_script_path: &std::ffi::OsStr,
+        #[cfg(target_os = "android")] askpass_socket_path: &std::ffi::OsStr,
         additional_args: Vec<String>,
         socket_path: &std::path::Path,
         destination_args: Vec<String>,
@@ -328,7 +329,13 @@ impl MasterProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("SSH_ASKPASS_REQUIRE", "force")
-            .env("SSH_ASKPASS", askpass_script_path)
+            .env("SSH_ASKPASS", askpass_script_path);
+        // Android execs the askpass binary directly (no wrapper script:
+        // W^X forbids exec'ing one from the app's writable dirs), so the
+        // socket path travels as an environment variable, as on Windows.
+        #[cfg(target_os = "android")]
+        master_process.env("ZED_ASKPASS_SOCKET", askpass_socket_path);
+        master_process
             .args(additional_args)
             .args(args);
 
@@ -844,6 +851,8 @@ impl SshRemoteConnection {
             let socket_path = temp_dir.path().join("ssh.sock");
             let mut master_process = MasterProcess::new(
                 askpass.script_path().as_ref(),
+                #[cfg(target_os = "android")]
+                askpass.socket_path().as_ref(),
                 connection_options.additional_args(),
                 &socket_path,
                 connection_options.ssh_destination_args(),

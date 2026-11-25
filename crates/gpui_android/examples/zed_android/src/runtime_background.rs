@@ -1,4 +1,4 @@
-//! Background survival of the rootfs engine's children: the
+//! Background survival of the app's children: the
 //! `android_runtime.keep_awake` setting feeding the runtime foreground
 //! service, and the battery-optimization exemption Android asks the user
 //! for in a system dialog. The service itself is driven from the process
@@ -92,11 +92,10 @@ fn allow_all_files_access(
     }
 }
 
-/// Ask once, on the launch that set the runtime up. The marker keeps the
-/// dialog from returning after a reset; the settings page has the button
-/// for later.
+/// Ask once per install. The marker keeps the dialog from returning; the
+/// settings page has the button for later.
 pub fn prompt_battery_exemption_once() {
-    let marker = zdroid_runtime::data_path()
+    let marker = paths::data_dir()
         .join("etc")
         .join("battery-exemption-asked");
     if marker.exists() {

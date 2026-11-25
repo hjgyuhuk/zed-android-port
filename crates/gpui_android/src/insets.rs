@@ -12,8 +12,9 @@ use jni::objects::JObject;
 /// One window's insets in physical pixels, as its Activity reported them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PhysicalInsets {
-    /// `WindowInsets` types `systemBars() | displayCutout()`, zero where
-    /// the system bars are hidden.
+    /// `WindowInsets` types `systemBars() | displayCutout()`, ignoring
+    /// visibility: the surface is margined by these, so they hold still
+    /// while the keyboard covers the navigation bar.
     pub(crate) safe_area_left: i32,
     pub(crate) safe_area_top: i32,
     pub(crate) safe_area_right: i32,

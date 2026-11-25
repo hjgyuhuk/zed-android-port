@@ -7490,8 +7490,6 @@ dependencies = [
  "ureq",
  "util",
  "uuid",
- "zd_engine_core",
- "zdroid_runtime",
 ]
 
 [[package]]
@@ -7692,7 +7690,6 @@ dependencies = [
  "anyhow",
  "log",
  "which",
- "zdroid_hooks",
 ]
 
 [[package]]
@@ -16521,7 +16518,6 @@ dependencies = [
  "url",
  "util",
  "workspace",
- "zdroid_runtime",
  "zed_actions",
  "zed_credentials_provider",
 ]
@@ -22496,7 +22492,6 @@ version = "0.1.0"
 dependencies = [
  "futures 0.3.34",
  "log",
- "zd_engine_core",
 ]
 
 [[package]]

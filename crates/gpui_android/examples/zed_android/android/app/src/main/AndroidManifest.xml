@@ -9,8 +9,8 @@
       Settings > Android opens again. Projects under the app files dir need none
       of this.
     -->
-    <!-- Required for any HTTP/HTTPS: Zed's HTTP client and every tool in
-         the rootfs (apt, curl, git, npm). -->
+    <!-- Required for any HTTP/HTTPS: Zed's HTTP client, SSH remote
+         projects, and the system tools it spawns (ssh, git). -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>

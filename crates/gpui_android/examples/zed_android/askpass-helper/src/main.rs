@@ -19,10 +19,12 @@
 //!
 //! This helper is the missing piece: a tiny, regular ELF (not Zygote /
 //! not Dalvik / not app_process) that does the same socket-IPC dance the
-//! askpass crate's `main()` does on desktop. It gets bundled in the APK
-//! as an asset, extracted to `<data>/files/zed-askpass-helper` at boot,
-//! and wired in via `askpass::set_askpass_program` so any subsequent
-//! AskPassSession uses this binary instead of `current_exe()`.
+//! askpass crate's `main()` does on desktop. It ships in the APK as
+//! `libaskpass.so` in the native library dir — the one app-owned location
+//! the kernel may exec from at any targetSdk — and is wired in via
+//! `askpass::set_askpass_program` so any subsequent AskPassSession uses
+//! this binary instead of `current_exe()`. ssh execs it directly with the
+//! prompt as argv[1]; the socket path arrives as ZED_ASKPASS_SOCKET.
 //!
 //! Protocol (kept identical to `crates/askpass/src/askpass.rs::main` so
 //! the existing socket server in the gpui process Just Works):
@@ -55,10 +57,25 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let socket = match env::args().find_map(|a| a.strip_prefix("--askpass=").map(String::from)) {
-        Some(s) if !s.is_empty() => s,
+    // ssh execs SSH_ASKPASS directly with the prompt as argv[1] and no way
+    // to pass extra arguments, so the socket path arrives as ZED_ASKPASS_SOCKET
+    // (as on Windows). The --askpass= form stays for the desktop-style script
+    // flow, which pipes the prompt into stdin instead.
+    let mut prompts = Vec::new();
+    let mut socket = None;
+    for argument in env::args().skip(1) {
+        match argument.strip_prefix("--askpass=") {
+            Some(value) if !value.is_empty() => socket = Some(value.to_string()),
+            _ => prompts.push(argument),
+        }
+    }
+    let socket = socket.or_else(|| env::var("ZED_ASKPASS_SOCKET").ok());
+    let socket = match socket {
+        Some(socket) if !socket.is_empty() => socket,
         _ => {
-            eprintln!("zed-askpass-helper: missing or empty --askpass=<socket> argument");
+            eprintln!(
+                "zed-askpass-helper: no --askpass=<socket> argument or ZED_ASKPASS_SOCKET environment variable"
+            );
             return ExitCode::from(2);
         }
     };
@@ -71,11 +88,16 @@ fn main() -> ExitCode {
         }
     };
 
-    let mut prompt = Vec::new();
-    if let Err(err) = io::stdin().read_to_end(&mut prompt) {
-        eprintln!("zed-askpass-helper: read stdin: {err}");
-        return ExitCode::from(1);
-    }
+    let mut prompt = if prompts.is_empty() {
+        let mut prompt = Vec::new();
+        if let Err(err) = io::stdin().read_to_end(&mut prompt) {
+            eprintln!("zed-askpass-helper: read stdin: {err}");
+            return ExitCode::from(1);
+        }
+        prompt
+    } else {
+        prompts.join("\0").into_bytes()
+    };
     if prompt.last() != Some(&b'\0') {
         prompt.push(b'\0');
     }

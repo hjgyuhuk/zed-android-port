@@ -193,6 +193,7 @@ class MainActivity : GameActivity(), ZdroidWindow {
             OpenedFiles.handle(this, intent)
         }
         enterEdgeToEdge()
+        surfaceView()?.insetBySafeArea()
         ime.install()
         getSystemService(InputManager::class.java)
             ?.registerInputDeviceListener(inputDeviceListener, null)
@@ -647,10 +648,9 @@ class MainActivity : GameActivity(), ZdroidWindow {
     }
 
     /// Returns Android's currently-active DNS server IPs as a comma-joined
-    /// string, which the Rust side writes to the runtime's
-    /// /etc/resolv.conf at boot ([watchDnsServers] keeps it current). Falls
-    /// back to empty string if no active network — caller layers in
-    /// public-DNS defaults.
+    /// string for the Rust side's diagnostics ([watchDnsServers] reports
+    /// changes). Falls back to empty string if no active network — caller
+    /// layers in public-DNS defaults.
     @Suppress("unused") // called from Rust via JNI
     fun getActiveDnsServers(): String {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
@@ -665,10 +665,9 @@ class MainActivity : GameActivity(), ZdroidWindow {
     private var dnsCallback: ConnectivityManager.NetworkCallback? = null
 
     /// Reports the default network's DNS servers to Rust whenever they
-    /// change (Wi-Fi to mobile data, a VPN connecting), so the runtime's
-    /// `/etc/resolv.conf` follows Android's. Its programs use glibc's
-    /// resolver, which reads only that file. Android calls back once right
-    /// after registering, with the current servers.
+    /// change (Wi-Fi to mobile data, a VPN connecting), for logging. The
+    /// system resolver (netd) follows the network on its own. Android
+    /// calls back once right after registering, with the current servers.
     private fun watchDnsServers() {
         val connectivity = getSystemService(ConnectivityManager::class.java) ?: return
         val callback = object : ConnectivityManager.NetworkCallback() {
@@ -730,8 +729,8 @@ class MainActivity : GameActivity(), ZdroidWindow {
     }
 
     /// Directory the installer extracted this APK's native libraries to.
-    /// The rootfs engine's loader (libzdload.so) lives here and is exec'd
-    /// by path: it is the only app-owned location SELinux lets a process
+    /// The askpass helper (libaskpass.so) lives here and is exec'd by
+    /// path: it is the only app-owned location SELinux lets a process
     /// execute from regardless of targetSdk.
     @Suppress("unused") // called from Rust via JNI
     fun nativeLibraryDir(): String = applicationInfo.nativeLibraryDir ?: ""

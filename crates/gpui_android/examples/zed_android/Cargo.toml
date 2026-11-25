@@ -109,9 +109,7 @@ util = { path = "../../../util" }
 watch = { path = "../../../watch" }
 web_search = { path = "../../../web_search" }
 workspace = { path = "../../../workspace" }
-zd_engine_core = { path = "../../../zd_engine_core" }
 zdroid_hooks = { path = "../../../zdroid_hooks" }
-zdroid_runtime = { path = "../../../zdroid_runtime" }
 release_channel = { path = "../../../release_channel" }
 reqwest_client = { path = "../../../reqwest_client" }
 search = { path = "../../../search" }
@@ -397,7 +395,6 @@ workspace = { opt-level = "z" }
 worktree = { opt-level = "z" }
 x_ai = { opt-level = "z" }
 x_ai_subscribed = { opt-level = "z" }
-zdroid_runtime = { opt-level = "z" }
 zed_actions = { opt-level = "z" }
 zed_credentials_provider = { opt-level = "z" }
 zed_env_vars = { opt-level = "z" }

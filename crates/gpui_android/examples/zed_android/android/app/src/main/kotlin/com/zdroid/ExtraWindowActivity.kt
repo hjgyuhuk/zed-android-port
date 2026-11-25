@@ -33,7 +33,7 @@ class ExtraWindowActivity : AppCompatActivity(), ZdroidWindow {
 
         // On freeform-windowing devices the OS-managed chrome (close X, drag
         // bar) renders on its own decoration layer above this Activity, so
-        // hiding system bars here doesn't strip it.
+        // the system bars showing here don't strip it.
         enterEdgeToEdge()
 
         if (windowId < 0L) {
@@ -86,6 +86,7 @@ class ExtraWindowActivity : AppCompatActivity(), ZdroidWindow {
         }
         surfaceView = surface
         setContentView(surface)
+        surface.insetBySafeArea()
         ime.install()
     }
 

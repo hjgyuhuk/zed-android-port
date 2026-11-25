@@ -1,9 +1,9 @@
 //! Logs the SELinux domain of the app process at boot.
 //!
-//! The rootfs engine runs in any untrusted app domain: the kernel only
-//! execs the loader in the APK's native library dir, and the Ubuntu
-//! binaries are mapped, never exec'd as files. The line is a diagnostic
-//! for reading a spawn failure against the domain, not a gate.
+//! The domain decides what the app's children may exec: the askpass
+//! helper runs from the APK's native library dir, the only app-owned
+//! location exec is allowed from at any targetSdk. The line is a
+//! diagnostic for reading a spawn failure against the domain, not a gate.
 
 pub fn check_selinux_context() {
     let context = std::fs::read_to_string("/proc/self/attr/current").ok();

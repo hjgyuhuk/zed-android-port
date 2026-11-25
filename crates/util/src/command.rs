@@ -38,13 +38,7 @@ impl Command {
             cmd.creation_flags(CREATE_NO_WINDOW);
             Self(cmd)
         }
-        #[cfg(target_os = "android")]
-        {
-            // Android's synchronous and asynchronous spawns need the same
-            // runtime routing. smol preserves the std command.
-            Self(new_std_command(program).into())
-        }
-        #[cfg(not(any(target_os = "windows", target_os = "android")))]
+        #[cfg(not(target_os = "windows"))]
         Self(smol::process::Command::new(program))
     }
 
@@ -67,14 +61,6 @@ impl Command {
     }
 
     pub fn env(&mut self, key: impl AsRef<OsStr>, val: impl AsRef<OsStr>) -> &mut Self {
-        // The runtime's programs see the guest environment, which a PATH set
-        // here has to reach.
-        #[cfg(target_os = "android")]
-        if key.as_ref() == "PATH"
-            && let Some((name, value)) = zdroid_hooks::guest_env_for_path(val.as_ref())
-        {
-            self.0.env(name, value);
-        }
         self.0.env(key, val);
         self
     }
@@ -85,11 +71,6 @@ impl Command {
         K: AsRef<OsStr>,
         V: AsRef<OsStr>,
     {
-        #[cfg(target_os = "android")]
-        for (key, val) in vars {
-            self.env(key, val);
-        }
-        #[cfg(not(target_os = "android"))]
         self.0.envs(vars);
         self
     }

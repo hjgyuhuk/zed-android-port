@@ -11,7 +11,7 @@ use ndk::native_window::{FrameRateCompatibility, NativeWindow};
 use raw_window_handle as rwh;
 
 use gpui::{
-    AnyWindowHandle, Bounds, Capslock, Corners, DevicePixels, DispatchEventResult, Edges,
+    AnyWindowHandle, Bounds, Capslock, DevicePixels, DispatchEventResult,
     FrameRequestSource, GestureTuning, GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay,
     PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel,
     RequestFrameOptions, Scene, Size, TextInputStateChange, WindowAppearance,
@@ -186,8 +186,11 @@ impl AndroidWindowState {
     /// windows don't get `adjustResize`, so this shrinks the layout the way
     /// it shrinks native views. The surface keeps its size: gpui draws from
     /// the top-left corner, and the keyboard and the row cover the rest.
+    /// The Activity margins the surface inside the system bars, so only the
+    /// part of them reaching above the surface's bottom edge covers it.
     pub(crate) fn layout_bounds(&self) -> Bounds<Pixels> {
-        let obscured_height = self.to_logical(self.insets.obscured_bottom);
+        let obscured = (self.insets.obscured_bottom - self.insets.safe_area_bottom).max(0);
+        let obscured_height = self.to_logical(obscured);
         let mut bounds = self.bounds;
         bounds.size.height = (bounds.size.height - obscured_height).max(Pixels::ZERO);
         bounds
@@ -198,21 +201,10 @@ impl AndroidWindowState {
     }
 
     fn window_insets(&self) -> WindowInsets {
-        let insets = self.insets;
-        WindowInsets {
-            safe_area: Edges {
-                top: self.to_logical(insets.safe_area_top),
-                right: self.to_logical(insets.safe_area_right),
-                // Measured from the layout area's bottom edge, which is the
-                // keyboard's or the extras row's top edge while it's up.
-                bottom: self.to_logical((insets.safe_area_bottom - insets.obscured_bottom).max(0)),
-                left: self.to_logical(insets.safe_area_left),
-            },
-            // Consumed, as `adjustResize` consumes it: the layout area
-            // already ends above the keyboard.
-            ime: Edges::default(),
-            corner_radii: Corners::default(),
-        }
+        // The surface is margined inside the system bars and the cutout, and
+        // the layout area already ends above the keyboard, as `adjustResize`
+        // consumes it: the whole gpui window is safe area.
+        WindowInsets::default()
     }
 }
 

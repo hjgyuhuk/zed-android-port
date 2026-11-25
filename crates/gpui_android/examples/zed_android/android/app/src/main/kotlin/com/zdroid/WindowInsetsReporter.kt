@@ -100,7 +100,10 @@ class WindowInsetsReporter(
 
     /// Returns whether the reported insets changed.
     private fun update(insets: WindowInsetsCompat, ime: Int): Boolean {
-        safeArea = insets.getInsets(SAFE_AREA)
+        // Ignoring visibility: the surface's margins hold still while the
+        // keyboard covers the navigation bar, and Rust subtracts this same
+        // bottom from the keyboard's reach.
+        safeArea = insets.getInsetsIgnoringVisibility(SAFE_AREA)
         if (ime != imeBottom) {
             imeBottom = ime
             onImeBottomChanged(ime)

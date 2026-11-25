@@ -9,11 +9,5 @@ android/local.properties
 # Release signing — never commit. Back up off-machine.
 android/app/release.keystore
 android/app/signing.properties
-# The Ubuntu base image is downloaded by the `fetchRootfsImage` Gradle
-# task (checksum pinned in crates/zdroid_runtime/rootfs-image.properties)
-# and staged here for APK packaging. Not committed.
-android/app/src/main/assets/rootfs/
-# Built by Gradle's `buildAskpassHelper` for every APK.
-android/app/src/main/assets/zed-askpass-helper
 *.iml
 .DS_Store

@@ -27,15 +27,9 @@ pub fn new_std_command(program: impl AsRef<OsStr>) -> std::process::Command {
     command
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "android")))]
+#[cfg(not(target_os = "windows"))]
 pub fn new_std_command(program: impl AsRef<OsStr>) -> std::process::Command {
     std::process::Command::new(program)
-}
-
-/// Android routes spawns into the runtime's userland.
-#[cfg(target_os = "android")]
-pub fn new_std_command(program: impl AsRef<OsStr>) -> std::process::Command {
-    zdroid_hooks::new_std_command(program)
 }
 
 #[cfg(target_os = "windows")]

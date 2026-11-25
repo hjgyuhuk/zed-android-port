@@ -5174,8 +5174,6 @@ dependencies = [
  "ureq",
  "util",
  "uuid",
- "zd_engine_core",
- "zdroid_runtime",
 ]
 
 [[package]]
@@ -5214,7 +5212,6 @@ dependencies = [
  "anyhow",
  "log",
  "which",
- "zdroid_hooks",
 ]
 
 [[package]]
@@ -11680,7 +11677,6 @@ dependencies = [
  "url",
  "util",
  "workspace",
- "zdroid_runtime",
  "zed_actions",
  "zed_credentials_provider",
 ]
@@ -12578,17 +12574,6 @@ name = "tagptr"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
-
-[[package]]
-name = "tar"
-version = "0.4.46"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
-dependencies = [
- "filetime",
- "libc",
- "xattr",
-]
 
 [[package]]
 name = "target-lexicon"
@@ -15931,28 +15916,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "zd_engine_core"
-version = "0.1.0"
-
-[[package]]
 name = "zdroid_hooks"
 version = "0.1.0"
 dependencies = [
  "futures",
  "log",
- "zd_engine_core",
-]
-
-[[package]]
-name = "zdroid_runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "flate2",
- "libc",
- "log",
- "tar",
- "zd_engine_core",
 ]
 
 [[package]]
@@ -16146,9 +16114,7 @@ dependencies = [
  "web_search",
  "which_key",
  "workspace",
- "zd_engine_core",
  "zdroid_hooks",
- "zdroid_runtime",
  "zed_actions",
  "zlog",
  "zlog_settings",

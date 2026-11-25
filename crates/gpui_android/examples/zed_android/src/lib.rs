@@ -5,14 +5,12 @@
 
 mod android_input;
 mod app_updater;
-mod engine_self_test;
 mod header;
 mod logging;
 mod lsp_watchdog;
 mod menu_bar;
 mod noexec_modal;
 mod runtime_background;
-mod runtime_setup;
 mod title_bar;
 mod zed;
 
@@ -53,7 +51,6 @@ use workspace::{
     WorkspaceDb, WorkspaceSettings, WorkspaceStore, notifications::NotificationId,
     restore_multiworkspace,
 };
-use zdroid_runtime::Runtime;
 
 /// The Zed release this app is built from, reported as the app version so
 /// SSH projects fetch the matching stable remote server. Read from
@@ -522,42 +519,39 @@ fn android_main(app: AndroidApp) {
 
     let data_path = app
         .internal_data_path()
-        .unwrap_or_else(|| PathBuf::from(zdroid_runtime::DEFAULT_DATA_PATH));
+        .unwrap_or_else(|| PathBuf::from("/data/data/com.zdroid/files"));
     info!("zed_android: data_path = {}", data_path.display());
-    zdroid_runtime::set_data_path(data_path.clone());
     gpui_android::process_hygiene::ensure_working_directory(&data_path);
-    // The runtime seeds the guest's /etc/resolv.conf and time zone from
-    // the device's; Android has neither file.
-    zdroid_runtime::set_nameservers(gpui_android::dns_bridge::android_dns_servers(&app));
-    zdroid_runtime::set_timezone(gpui_android::system_properties::timezone());
-    let runtime = Runtime::new(&data_path);
-    if runtime.kernel_data_path() != data_path {
+    // The kernel names the files dir by the route it walked: at targetSdk
+    // 35 that is the /data/data bind mount, while the editor spells paths
+    // /data/user/0. Register both so stored paths and kernel paths agree.
+    let kernel_data_path =
+        std::fs::canonicalize(&data_path).unwrap_or_else(|_| data_path.clone());
+    if kernel_data_path != data_path {
         info!(
             "zed_android: the kernel spells the files dir {}",
-            runtime.kernel_data_path().display()
+            kernel_data_path.display()
         );
     }
-    zdroid_hooks::register_files_dir_spellings(
-        data_path.clone(),
-        runtime.kernel_data_path().to_path_buf(),
-    );
+    zdroid_hooks::register_files_dir_spellings(data_path.clone(), kernel_data_path);
 
-    // The Zed process env comes from the runtime: the host shape (the guest's
-    // HOME, PATH with the loader links first) plus the engine variables every
-    // child needs to reach the loader configured. The integrated terminal
-    // inherits it. LD_LIBRARY_PATH stays unset: it would reach every child,
+    // The editor and every child it spawns (ssh, the terminal's shell) run
+    // against the system itself: the ROM's binaries on PATH, the app's home
+    // as HOME. LD_LIBRARY_PATH stays unset: it would reach every child,
     // including /system/bin programs.
     //
-    // SAFETY: `set_var` and `remove_var` change libc's process state. No other
-    // thread that reads the environment exists yet: gpui's start below, and
-    // the JVM's own threads don't touch libc's environment.
+    // SAFETY: `set_var` changes libc's process state. No other thread that
+    // reads the environment exists yet: gpui's start below, and the JVM's
+    // own threads don't touch libc's environment.
     unsafe {
-        for (key, op) in &runtime.env_for_zed_process() {
-            match op {
-                zdroid_runtime::EnvOp::Set(value) => std::env::set_var(key, value),
-                zdroid_runtime::EnvOp::Remove => std::env::remove_var(key),
-            }
-        }
+        std::env::set_var("HOME", data_path.join("home"));
+        std::env::set_var("SHELL", "/system/bin/sh");
+        std::env::set_var("TMPDIR", data_path.join("tmp"));
+        std::env::set_var(
+            "PATH",
+            "/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:\
+             /system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:/vendor/xbin",
+        );
         // The app runs on the Dev channel, where zed_credentials_provider
         // otherwise writes API keys and tokens to a plaintext JSON file. Use
         // gpui's credential API instead, which gpui_android backs with the
@@ -578,14 +572,14 @@ fn android_main(app: AndroidApp) {
         std::env::var("SHELL").unwrap_or_default(),
     );
 
-    // The runtime's TMPDIR may not exist yet, and temp files such as SSH's
-    // askpass socket go there.
+    // TMPDIR may not exist yet, and temp files such as SSH's askpass socket
+    // go there.
     let temp_dir = std::env::temp_dir();
     if let Err(error) = std::fs::create_dir_all(&temp_dir) {
         log::warn!("zed_android: can't create {}: {error}", temp_dir.display());
     }
 
-    gpui_android::storage::register_workspace_root(runtime.workspace_root());
+    gpui_android::storage::register_workspace_root(data_path.join("home"));
 
     // Logged so a spawn failure can be read against them.
     gpui_android::selinux_canary::check_selinux_context();
@@ -595,97 +589,33 @@ fn android_main(app: AndroidApp) {
     // toggle, asked once per install. Settings → Android opens it again.
     gpui_android::storage::request_once(&app);
 
-    // The engine's loader ships in the APK's native library dir (extracted
-    // on install), the one app-owned location the kernel may exec from at
-    // any targetSdk. Logged so a packaging regression (extractNativeLibs
-    // flipped back off, the strip task mangling the static ELF) shows at
-    // boot.
-    match gpui_android::runtime_links::loader_path(&app) {
-        Ok(path) => {
-            let size = std::fs::metadata(&path).map(|metadata| metadata.len()).ok();
-            log::info!(
-                "zed_android: engine loader = {} exists={} size={size:?}",
-                path.display(),
-                path.is_file(),
-            );
-            if path.is_file()
-                && let Err(err) = gpui_android::runtime_links::ensure_loader_link(&data_path, &path)
-            {
-                log::warn!("zed_android: loader link failed: {err:#}");
-            }
-        }
-        Err(err) => log::warn!("zed_android: engine loader path unavailable: {err:#}"),
-    }
-
-    runtime_setup::sweep_previous_runtimes(&data_path);
-
-    // First launch: extract the bundled Ubuntu image now, while the splash
-    // is up. The outcome reaches the workspace as a notification (a failure
-    // with Retry, or the essentials step starting).
-    let boot_setup = runtime_setup::setup_at_boot(&app, &runtime);
-
-    // Resolvers change with the network, and the zone with the user's
-    // choice; refresh the guest's view of them every boot.
-    if let Err(err) =
-        zdroid_runtime::install::reseed_resolv(&runtime, &zdroid_runtime::nameservers())
-    {
-        log::warn!("zed_android: resolv.conf reseed failed: {err:#}");
-    }
-    if let Err(err) =
-        zdroid_runtime::install::reseed_timezone(&runtime, &zdroid_runtime::timezone())
-    {
-        log::warn!("zed_android: time zone seed failed: {err:#}");
-    }
-    // A rootfs installed before the links existed gets them now.
-    if let Err(err) = zdroid_runtime::install::link_home(&runtime) {
-        log::warn!("zed_android: linking the home folder failed: {err:#}");
-    }
-
-    // Populate <data>/files/zd-runtime/ with one symlink per program the
-    // rootfs holds, each pointing at the loader; kernel PATH lookup of
-    // `Command::new("rust-analyzer")` then lands in the rootfs. apt or
-    // cargo installing a tool shows up through the watcher in `boot`.
-    let binaries = runtime.list_binaries();
-    log::info!(
-        "zed_android: zd-runtime: {} binaries in the rootfs",
-        binaries.len()
-    );
-    if let Err(err) = gpui_android::runtime_links::ensure_runtime_symlinks(
-        &data_path,
-        &binaries,
-        &runtime.farm_link_target(),
-    ) {
-        log::warn!(
-            "zed_android: zd-runtime symlinks failed: {err:#}; \
-             LSPs that resolve binaries via PATH will fail to spawn"
-        );
-    }
+    sweep_previous_runtimes(&data_path);
 
     // Before any AskPassSession exists: the askpass crate otherwise settles
     // on current_exe(), which on Android is /system/bin/app_process64. The
     // helper also stands in for `zed --printenv` in Zed's shell capture.
-    let askpass_path = match gpui_android::askpass_install::ensure_installed(&app, &data_path) {
-        Ok(path) => path,
-        Err(err) => {
-            log::warn!("zed_android: askpass helper install failed: {err:#}");
-            data_path.join("zed-askpass-helper")
+    // It ships in the APK's native library dir (extracted on install), the
+    // one app-owned location the kernel may exec from at any targetSdk.
+    // Logged so a packaging regression (extractNativeLibs flipped back off)
+    // shows at boot.
+    match gpui_android::askpass_install::helper_path(&app) {
+        Ok(askpass_path) if askpass_path.is_file() => {
+            askpass::set_askpass_program(askpass_path.clone());
+            zdroid_hooks::register_zed_helper(askpass_path.clone());
+            log::info!(
+                "zed_android: askpass program set to {}",
+                askpass_path.display()
+            );
         }
-    };
-    if askpass_path.is_file() {
-        askpass::set_askpass_program(askpass_path.clone());
-        zdroid_hooks::register_zed_helper(askpass_path.clone());
-        log::info!(
-            "zed_android: askpass program set to {}",
-            askpass_path.display()
-        );
-    } else {
-        log::warn!(
-            "zed_android: askpass helper missing at {}; SSH password / \
-             passphrase prompts will fall through to current_exe() and \
-             abort under SELinux, and the login shell's environment can't \
-             be read",
-            askpass_path.display()
-        );
+        Ok(askpass_path) => {
+            log::warn!(
+                "zed_android: askpass helper missing at {}; SSH password / \
+                 passphrase prompts will fall through to current_exe() and \
+                 abort under SELinux",
+                askpass_path.display()
+            );
+        }
+        Err(err) => log::warn!("zed_android: askpass helper path unavailable: {err:#}"),
     }
 
     // As in Zed's main(), which android_main stands in for.
@@ -706,10 +636,70 @@ fn android_main(app: AndroidApp) {
         }
     });
     application.run(move |cx: &mut App| {
-        if let Err(err) = boot(cx, &data_path, boot_setup, open_request_receiver) {
+        if let Err(err) = boot(cx, &data_path, open_request_receiver) {
             error!("zed_android: boot failed: {err:#}");
         }
     });
+}
+
+/// Files earlier releases left under the data dir that nothing can use
+/// anymore: the Ubuntu rootfs and the loader links into it, the bootstrap
+/// prefix (`usr`, up to 240 MB of a userland only the removed adapter could
+/// run), the old `bin/zd-exec` bridge binary and the adapter selection
+/// file. User content (`home`, the editor's own state under it) is never
+/// touched.
+fn sweep_previous_runtimes(data_path: &Path) {
+    for relative in [
+        "bin/zd-exec",
+        "bin/zdload",
+        "etc/zd-runtime.toml",
+        ".rootfs-version",
+        "zed-askpass-helper",
+    ] {
+        let path = data_path.join(relative);
+        match std::fs::remove_file(&path) {
+            Ok(()) => log::info!("zed_android: removed {}", path.display()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => log::warn!("zed_android: cannot remove {}: {error}", path.display()),
+        }
+    }
+    // The symlink farm only ever held links to the removed loader.
+    let farm = data_path.join("zd-runtime");
+    if farm.is_dir()
+        && let Err(error) = std::fs::remove_dir_all(&farm)
+    {
+        log::warn!("zed_android: cannot remove {}: {error}", farm.display());
+    }
+    for dir_name in ["usr", "rootfs"] {
+        let prefix = data_path.join(dir_name);
+        let doomed = data_path.join(format!("{dir_name}.removing"));
+        // Renamed first so a launch cut short mid-deletion leaves a name no
+        // future code looks for; deleting a package tree takes seconds and
+        // the editor need not wait for it. A previous launch may have left
+        // the renamed tree behind.
+        let target = if prefix.is_dir() {
+            match std::fs::rename(&prefix, &doomed) {
+                Ok(()) => doomed,
+                Err(error) => {
+                    log::warn!("zed_android: cannot rename {}: {error}", prefix.display());
+                    prefix
+                }
+            }
+        } else if doomed.is_dir() {
+            doomed
+        } else {
+            continue;
+        };
+        std::thread::Builder::new()
+            .name("sweep-prefix".into())
+            .spawn(move || match std::fs::remove_dir_all(&target) {
+                Ok(()) => log::info!("zed_android: removed {}", target.display()),
+                Err(error) => {
+                    log::warn!("zed_android: cannot remove {}: {error}", target.display())
+                }
+            })
+            .log_err();
+    }
 }
 
 /// 0.4.0 and earlier kept credentials in zed_credentials_provider's plaintext
@@ -765,15 +755,10 @@ fn is_runtime_shell_leftover(shell: &settings::Shell, data_path: &Path) -> bool 
 fn boot(
     cx: &mut App,
     data_path: &std::path::Path,
-    boot_setup: runtime_setup::BootSetup,
     open_requests: futures::channel::mpsc::UnboundedReceiver<Vec<String>>,
 ) -> Result<()> {
     // Every `paths::*` function (config_dir, database_dir, logs_dir,
-    // languages_dir, extensions_dir) derives from the app files dir, which is
-    // identity-mapped into the guest so Zed and the tools it spawns agree on
-    // every path. Absolute-path spawns under it are routed through the loader
-    // by `zdroid_hooks`.
-    zdroid_hooks::register_environment_root(data_path.to_path_buf());
+    // languages_dir, extensions_dir) derives from the app files dir.
     paths::set_custom_data_dir(&data_path.to_string_lossy());
     info!("zed_android: paths data_dir set");
 
@@ -785,22 +770,20 @@ fn boot(
     let home = data_path.join("home");
     let projects_dir = home.join("projects");
     for path in [
-        // The guest's `/dev/shm` and `/tmp` are bound to `tmp`; `etc` holds
-        // the runtime's markers and `bin` the loader link.
-        &data_path.join("tmp/shm"),
-        &data_path.join("etc"),
-        &data_path.join("bin"),
         &home,
         // Default landing dir for the project picker, on app-private storage,
         // where programs can run. Nothing executable runs from /sdcard, so
         // projects opened there get copied here.
         &projects_dir,
+        // `etc` holds the app's markers (the battery-exemption prompt's).
+        &data_path.join("etc"),
     ] {
         if let Err(err) = std::fs::create_dir_all(path) {
             error!("zed_android: create_dir_all({}): {err:#}", path.display());
         }
     }
     logging::init_log_file();
+    runtime_background::prompt_battery_exemption_once();
     // ~/storage/* symlinks into shared storage. Lets users browse / open /
     // save individual files from /sdcard via ~/storage/{shared,downloads,
     // dcim,...} without ever treating those paths as a workspace root
@@ -852,9 +835,6 @@ fn boot(
     gpui_tokio::init(cx);
 
     let fs: Arc<dyn Fs> = RealFs::new(None, cx.background_executor().clone());
-    // As Zed's main() loads the login shell's environment here.
-    let login_environment_loaded =
-        runtime_setup::load_login_environment(fs.clone(), data_path.to_path_buf(), cx);
     zed::watch_settings_files(fs.clone(), cx);
     let (user_keymap_file_rx, user_keymap_watcher) = watch_config_file(
         cx.background_executor(),
@@ -926,16 +906,17 @@ fn boot(
     let workspace_store = cx.new(|cx| WorkspaceStore::new(client.clone(), cx));
     info!("zed_android: UserStore + WorkspaceStore constructed");
 
-    // Zed's NodeRuntime, set up as in crates/zed/src/main.rs. It uses a Node
-    // the runtime has on PATH (`apt install nodejs npm`), or else downloads
-    // its own: the Linux build, which runs in the runtime.
+    // Zed's NodeRuntime, set up as in crates/zed/src/main.rs. A Node on
+    // PATH (few ROMs ship one) is used; the managed download is a Linux
+    // build, which Android's kernel can't run without a Linux userland,
+    // so it is disabled.
     let (mut node_options_tx, node_options_rx) =
         watch::channel::<Option<node_runtime::NodeBinaryOptions>>(None);
     cx.observe_global::<SettingsStore>(move |cx| {
         let settings = &project::project_settings::ProjectSettings::get_global(cx).node;
         let options = node_runtime::NodeBinaryOptions {
             allow_path_lookup: !settings.ignore_system_version,
-            allow_binary_download: true,
+            allow_binary_download: false,
             use_paths: settings.path.as_ref().map(|node_path| {
                 let node_path = std::path::PathBuf::from(shellexpand::tilde(node_path).as_ref());
                 let npm_path = settings
@@ -958,12 +939,8 @@ fn boot(
     })
     .detach();
     ui::observe_scrollbar_settings::<SettingsStore>(cx);
-    let node_runtime = NodeRuntime::new(
-        client.http_client(),
-        Some(login_environment_loaded),
-        node_options_rx,
-    );
-    info!("zed_android: RealFs + NodeRuntime constructed (PATH lookup + managed download)");
+    let node_runtime = NodeRuntime::new(client.http_client(), None, node_options_rx);
+    info!("zed_android: RealFs + NodeRuntime constructed (PATH lookup only)");
 
     // gpui_android reads these settings outside any window, including during
     // onboarding, before a pane exists.
@@ -1051,12 +1028,8 @@ fn boot(
     })
     .detach();
 
-    // `terminal.shell` is re-derived every launch: the loader under its
-    // stable link, running root's login shell from the rootfs's
-    // /etc/passwd as a login shell, so `chsh` picks the terminal's shell
-    // from the next launch. alacritty's `pw_shell` lookup on Android
-    // returns /system/bin/sh, so this explicit shell is what makes a useful
-    // terminal at all.
+    // `terminal.shell` is re-derived every launch: the system's own shell,
+    // which alacritty's `pw_shell` lookup on Android also returns.
     //
     // It goes into Zed's default settings, not the user's settings.json.
     // Zed sends user settings to remote servers, and since Zed 1.25 a
@@ -1080,60 +1053,43 @@ fn boot(
         });
     });
 
-    let terminal_shell = Runtime::new(data_path).terminal_shell();
-    let shell_path = terminal_shell.program;
-    if shell_path.is_file() {
-        let shell_args = terminal_shell.args.join(" ");
-        let shell = settings::Shell::WithArguments {
-            program: shell_path.to_string_lossy().to_string(),
-            args: terminal_shell.args,
-            title_override: None,
-        };
-        SettingsStore::update_global(cx, |store, cx| {
-            store.update_default_settings(cx, |defaults| {
-                defaults
-                    .terminal
-                    .get_or_insert_with(settings::TerminalSettingsContent::default)
-                    .project
-                    .shell = Some(shell.clone());
-            });
+    let shell = settings::Shell::Program("/system/bin/sh".to_string());
+    SettingsStore::update_global(cx, |store, cx| {
+        store.update_default_settings(cx, |defaults| {
+            defaults
+                .terminal
+                .get_or_insert_with(settings::TerminalSettingsContent::default)
+                .project
+                .shell = Some(shell.clone());
         });
-        info!(
-            "zed_android: default terminal.shell -> {} {shell_args}",
-            shell_path.display()
-        );
+    });
+    info!("zed_android: default terminal.shell -> /system/bin/sh");
 
-        // 0.3.x and 0.4.0 wrote their shell into settings.json, where it
-        // outranks this default and reaches SSH remotes. Any program under
-        // the app files dir is such a leftover: a shell of the user's own
-        // choice is a path inside the rootfs.
-        let user_has_leftover_shell = cx
-            .global::<SettingsStore>()
-            .raw_user_settings()
-            .and_then(|user_settings| user_settings.content.terminal.as_ref())
-            .and_then(|terminal| terminal.project.shell.as_ref())
-            .is_some_and(|shell| is_runtime_shell_leftover(shell, data_path));
-        if user_has_leftover_shell {
-            let data_path = data_path.to_path_buf();
-            cx.global::<SettingsStore>()
-                .update_settings_file(fs.clone(), move |content, _cx| {
-                    if let Some(terminal) = content.terminal.as_mut()
-                        && terminal
-                            .project
-                            .shell
-                            .as_ref()
-                            .is_some_and(|shell| is_runtime_shell_leftover(shell, &data_path))
-                    {
-                        terminal.project.shell = None;
-                    }
-                });
-            info!("zed_android: removing an earlier release's terminal.shell from settings.json");
-        }
-    } else {
-        log::warn!(
-            "zed_android: loader link {} missing; leaving terminal.shell as-is",
-            shell_path.display()
-        );
+    // 0.3.x and 0.4.0 wrote their shell into settings.json, where it
+    // outranks this default and reaches SSH remotes. Any program under
+    // the app files dir is such a leftover: a shell of the user's own
+    // choice was a path inside the rootfs.
+    let user_has_leftover_shell = cx
+        .global::<SettingsStore>()
+        .raw_user_settings()
+        .and_then(|user_settings| user_settings.content.terminal.as_ref())
+        .and_then(|terminal| terminal.project.shell.as_ref())
+        .is_some_and(|shell| is_runtime_shell_leftover(shell, data_path));
+    if user_has_leftover_shell {
+        let data_path = data_path.to_path_buf();
+        cx.global::<SettingsStore>()
+            .update_settings_file(fs.clone(), move |content, _cx| {
+                if let Some(terminal) = content.terminal.as_mut()
+                    && terminal
+                        .project
+                        .shell
+                        .as_ref()
+                        .is_some_and(|shell| is_runtime_shell_leftover(shell, &data_path))
+                {
+                    terminal.project.shell = None;
+                }
+            });
+        info!("zed_android: removing an earlier release's terminal.shell from settings.json");
     }
 
     // Retain the client for public catalogs and project services, without
@@ -1182,7 +1138,6 @@ fn boot(
     workspace::init(app_state.clone(), cx);
     ui_prompt::init(cx);
     command_palette::init(cx);
-    runtime_setup::hide_confirmed_actions(cx);
     search::init(cx);
     lsp_locations::init(cx);
     // As in Zed's main(). The terminal panel uses this for its own buffer
@@ -1285,8 +1240,6 @@ fn boot(
     project::agent_server_store::AllAgentServersSettings::register(cx);
     onboarding::init(cx);
     menu_bar::register_actions(cx);
-    runtime_setup::register(boot_setup, cx);
-    engine_self_test::register(cx);
     runtime_background::register(cx);
     lsp_watchdog::init(cx);
     info!(
